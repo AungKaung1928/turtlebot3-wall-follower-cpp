@@ -1,0 +1,33 @@
+wall_follower_controller_cpp:
+  ros__parameters:
+    use_sim_time: true
+    
+    # Control parameters
+    desired_distance: 0.6        # Target distance from wall (m)
+    forward_speed: 0.20          # Normal forward speed (m/s)
+    search_speed: 0.16           # Speed during wall search (m/s)
+    max_angular_speed: 0.6       # Maximum angular velocity (rad/s)
+    
+    # PID parameters
+    kp: 1.8                      # Proportional gain
+    ki: 0.0                      # Integral gain (not used)
+    kd: 0.7                      # Derivative gain
+    
+    # Safety distances (increased for collision-free operation)
+    emergency_stop: 0.55         # Emergency brake distance (m)
+    slow_down_dist: 0.8          # Distance to start slowing down (m)
+    wall_min: 0.45              # Minimum allowed distance to wall (m)
+    wall_lost: 1.5              # Distance threshold for losing wall (m)
+    side_clearance: 0.4         # Minimum side obstacle clearance (m)
+    
+    # Wall detection parameters
+    wall_range: 1.5             # Maximum range for wall detection (m)
+    consistency: 0.3            # Maximum allowed variation in wall measurements (m)
+    
+    # Timing parameters
+    control_frequency: 20.0      # Control loop frequency (Hz)
+    laser_timeout: 1.0          # Timeout for laser data (s)
+    
+    # Debug parameters
+    debug_mode: false           # Enable debug output
+    verbose_logging: false      # Enable verbose logging

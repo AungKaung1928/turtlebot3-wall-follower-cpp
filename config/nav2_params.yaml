@@ -1,0 +1,20 @@
+# Basic navigation parameters for C++ wall following project
+robot_base_frame: "base_link"
+global_frame: "map"
+robot_radius: 0.22
+
+# Transform tolerance
+transform_timeout: 0.1
+
+# Map parameters
+map_topic: "map"
+map_subscribe_transient_local: true
+
+# Costmap parameters
+costmap:
+  global_costmap:
+    robot_radius: 0.22
+    footprint_padding: 0.01
+  local_costmap:
+    robot_radius: 0.22
+    footprint_padding: 0.01
