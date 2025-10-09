@@ -8,19 +8,19 @@ using namespace std::chrono_literals;
 WallFollowerController::WallFollowerController() 
     : Node("wall_follower_controller") {
     
-    // Parameters - ADJUSTED FOR SAFETY
-    desired_distance_ = 0.6;      // Increased from 0.5 for more clearance
-    forward_speed_ = 0.20;        // Slightly reduced for better control
-    search_speed_ = 0.16;
-    max_angular_speed_ = 0.6;
-    kp_ = 1.8; kd_ = 0.7;        // More responsive control
+    // Parameters - OPTIMIZED FOR SAFE WALL FOLLOWING
+    desired_distance_ = 0.8;     // Much farther from wall - safe distance
+    forward_speed_ = 0.22;       // Good forward speed
+    search_speed_ = 0.18;
+    max_angular_speed_ = 0.8;    // Can turn faster
+    kp_ = 2.0; kd_ = 0.5;        // More responsive PID
     
-    // Safety distances - INCREASED FOR NO CONTACT
-    emergency_stop_ = 0.55;       // Increased from 0.35 - much earlier detection
-    slow_down_dist_ = 0.8;        // Increased from 0.5
-    wall_min_ = 0.45;            // Increased from 0.35 - minimum wall distance
-    wall_lost_ = 1.5;            // Increased from 1.2
-    side_clearance_ = 0.4;       // Increased from 0.25 - side obstacle clearance
+    // Safety distances - LARGER FOR OBSTACLE AVOIDANCE
+    emergency_stop_ = 0.55;      // Stop distance from obstacles
+    slow_down_dist_ = 0.85;      // Start slowing down distance
+    wall_min_ = 0.50;            // Minimum distance to wall
+    wall_lost_ = 2.5;            // Max distance before losing wall
+    side_clearance_ = 0.45;      // Side clearance from obstacles
     
     // State initialization
     following_wall_ = false;
@@ -44,7 +44,7 @@ WallFollowerController::WallFollowerController()
     // Control timer (20 Hz)
     timer_ = this->create_wall_timer(50ms, std::bind(&WallFollowerController::controlLoop, this));
     
-    RCLCPP_INFO(this->get_logger(), "Wall Follower - Enhanced Safety Mode");
+    RCLCPP_INFO(this->get_logger(), "Wall Follower Started - Safe Mode");
 }
 
 void WallFollowerController::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
@@ -64,15 +64,11 @@ double WallFollowerController::getDist(double angle, bool avg) {
         return std::numeric_limits<double>::infinity();
     }
     
-    // Convert angle to radians
     double angle_rad = angle * M_PI / 180.0;
-    
-    // Calculate index
     int idx = static_cast<int>((angle_rad - laser_data_->angle_min) / laser_data_->angle_increment);
     
-    // Get multiple readings for averaging (wider range)
-    int start_idx = std::max(0, idx - 3);
-    int end_idx = std::min(static_cast<int>(laser_data_->ranges.size()) - 1, idx + 3);
+    int start_idx = std::max(0, idx - 5);
+    int end_idx = std::min(static_cast<int>(laser_data_->ranges.size()) - 1, idx + 5);
     
     std::vector<double> dists;
     for (int i = start_idx; i <= end_idx; ++i) {
@@ -87,11 +83,9 @@ double WallFollowerController::getDist(double angle, bool avg) {
     }
     
     if (avg) {
-        // Return average
         double sum = std::accumulate(dists.begin(), dists.end(), 0.0);
         return sum / dists.size();
     } else {
-        // Return minimum
         return *std::min_element(dists.begin(), dists.end());
     }
 }
@@ -113,25 +107,14 @@ double WallFollowerController::getMinInRange(int start, int end, int step) {
 }
 
 std::pair<bool, double> WallFollowerController::checkCollision() {
-    // Check front zones more thoroughly
-    double front_center = getMinInRange(-20, 20, 2);
-    double front_left = getMinInRange(20, 50, 3);
-    double front_right = getMinInRange(-50, -20, 3);
-    double front_wide_left = getMinInRange(50, 70, 5);
-    double front_wide_right = getMinInRange(-70, -50, 5);
+    // Wide front scanning for obstacles
+    double front_center = getMinInRange(-25, 25, 2);
+    double front_left = getMinInRange(25, 60, 3);
+    double front_right = getMinInRange(-60, -25, 3);
     
     double front = std::min({front_center, front_left, front_right});
     
-    // Check sides with increased clearance
-    double right = getMinInRange(-90, -60, 3);
-    double left = getMinInRange(60, 90, 3);
-    
-    // Collision if any zone is too close
-    bool collision = (front < emergency_stop_ ||
-                     right < side_clearance_ ||
-                     left < side_clearance_ ||
-                     front_wide_left < 0.35 ||
-                     front_wide_right < 0.35);
+    bool collision = (front < emergency_stop_);
     
     return std::make_pair(collision, front);
 }
@@ -139,13 +122,23 @@ std::pair<bool, double> WallFollowerController::checkCollision() {
 bool WallFollowerController::findWall() {
     double right = getDist(-90.0, true);
     double left = getDist(90.0, true);
+    double front = getDist(0.0, true);
     
+    // Prefer the closer wall if both available
     if (right < wall_lost_ || left < wall_lost_) {
-        wall_side_ = (right < left) ? "right" : "left";
+        if (right < left && right < 1.8) {
+            wall_side_ = "right";
+        } else if (left < 1.8) {
+            wall_side_ = "left";
+        } else {
+            wall_side_ = (right < left) ? "right" : "left";
+        }
+        
         following_wall_ = true;
         counter_ = 0;
         stuck_counter_ = 0;
-        RCLCPP_INFO(this->get_logger(), "Following %s wall", wall_side_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Following %s wall at %.2fm", 
+                    wall_side_.c_str(), (wall_side_ == "right") ? right : left);
         return true;
     }
     
@@ -159,45 +152,80 @@ geometry_msgs::msg::Twist WallFollowerController::wallFollow() {
     double angle = (wall_side_ == "right") ? -90.0 : 90.0;
     double wall_dist = getDist(angle, true);
     
-    // Lost wall?
+    // Also check 45-degree angle for better wall tracking
+    double angle_45 = (wall_side_ == "right") ? -45.0 : 45.0;
+    double wall_dist_45 = getDist(angle_45, true);
+    
+    // Get front distance - WIDE CHECK
+    double front_0 = getMinInRange(-30, 30, 2);
+    double front_left = getMinInRange(30, 70, 3);
+    double front_right = getMinInRange(-70, -30, 3);
+    double front = std::min({front_0, front_left, front_right});
+    
+    // Check if wall is lost
     if (wall_dist > wall_lost_) {
-        following_wall_ = false;
-        return search();
+        counter_++;
+        if (counter_ > 50) {  // Wait 2.5 seconds
+            RCLCPP_INFO(this->get_logger(), "Wall lost, searching...");
+            following_wall_ = false;
+            counter_ = 0;
+            return search();
+        }
+    } else {
+        counter_ = 0;
     }
     
-    // Too close to wall? More aggressive avoidance
-    if (wall_dist < wall_min_) {
-        cmd.linear.x = 0.08;  // Slower when too close
-        cmd.angular.z = (wall_side_ == "right") ? 0.6 : -0.6;  // More aggressive turn
+    // OBSTACLE AVOIDANCE: If front is blocked, turn AWAY from wall
+    if (front < emergency_stop_) {
+        cmd.linear.x = 0.0;  // STOP
+        cmd.angular.z = (wall_side_ == "right") ? 0.7 : -0.7;  // Turn away from wall
+        RCLCPP_WARN(this->get_logger(), "OBSTACLE! Front: %.2fm - Turning away", front);
         return cmd;
     }
     
-    // PID control with enhanced responsiveness
+    // If obstacle detected ahead but not immediate, slow down and prepare to turn
+    if (front < slow_down_dist_) {
+        cmd.linear.x = 0.12;  // Very slow
+        // Turn away from wall preemptively
+        cmd.angular.z = (wall_side_ == "right") ? 0.5 : -0.5;
+        return cmd;
+    }
+    
+    // Check if getting too close to wall (safety check)
+    if (wall_dist < wall_min_) {
+        cmd.linear.x = 0.15;
+        // Turn away from wall
+        cmd.angular.z = (wall_side_ == "right") ? 0.6 : -0.6;
+        RCLCPP_INFO(this->get_logger(), "Too close to wall: %.2fm", wall_dist);
+        return cmd;
+    }
+    
+    // NORMAL WALL FOLLOWING with PID
     double error = desired_distance_ - wall_dist;
     double angular = kp_ * error + kd_ * (error - prev_error_) / 0.05;
     
+    // Reverse for left wall
     if (wall_side_ == "left") {
         angular = -angular;
     }
     
+    // Limit angular velocity
     cmd.angular.z = clamp(angular, -max_angular_speed_, max_angular_speed_);
     
-    // Speed control based on front clearance with more conservative scaling
-    double front = getMinInRange(-30, 30, 2);
-    if (front < slow_down_dist_) {
-        // More conservative speed reduction
-        double factor = std::max(0.2, (front - emergency_stop_) / (slow_down_dist_ - emergency_stop_));
+    // Forward speed - adjust based on front distance and turning
+    if (front < 1.2) {
+        double factor = std::max(0.4, (front - emergency_stop_) / (1.2 - emergency_stop_));
         cmd.linear.x = forward_speed_ * factor;
     } else {
         cmd.linear.x = forward_speed_;
     }
     
-    // Further slow down for sharp turns
-    if (std::abs(cmd.angular.z) > 0.3) {
-        cmd.linear.x *= (1.0 - std::abs(cmd.angular.z) / max_angular_speed_ * 0.7);  // More aggressive slowdown
+    // Slow down for sharp turns to maintain control
+    if (std::abs(cmd.angular.z) > 0.5) {
+        cmd.linear.x *= 0.6;
     }
     
-    cmd.linear.x = std::max(cmd.linear.x, 0.05);
+    // Save error for next iteration
     prev_error_ = error;
     
     return cmd;
@@ -205,32 +233,51 @@ geometry_msgs::msg::Twist WallFollowerController::wallFollow() {
 
 geometry_msgs::msg::Twist WallFollowerController::search() {
     geometry_msgs::msg::Twist cmd;
-    double front = getMinInRange(-25, 25, 2);
     
-    // Speed based on front clearance
-    if (front > slow_down_dist_) {
-        cmd.linear.x = search_speed_;
+    double front = getMinInRange(-30, 30, 2);
+    double left = getDist(90.0, true);
+    double right = getDist(-90.0, true);
+    
+    // ALWAYS MOVE FORWARD while searching (key fix!)
+    if (front > 1.0) {
+        cmd.linear.x = search_speed_;  // Full speed if clear
+    } else if (front > emergency_stop_) {
+        cmd.linear.x = search_speed_ * 0.6;  // Slower but keep moving
     } else {
-        cmd.linear.x = search_speed_ * 0.4;
+        cmd.linear.x = 0.05;  // Very slow but still moving
     }
     
-    // Search pattern with stuck detection
     counter_++;
-    if (counter_ > 60) {  // Longer search periods
-        search_dir_ *= -1;
-        counter_ = 0;
-        stuck_counter_++;
-    }
     
-    // If stuck for too long, try more aggressive maneuver
+    // Active exploration strategy
     if (stuck_counter_ > 3) {
-        cmd.angular.z = 0.6 * search_dir_;
-        cmd.linear.x = 0.1;
-        if (counter_ > 30) {  // Reset stuck counter after trying
+        // Been searching too long - force exploration
+        // Move forward more aggressively
+        cmd.linear.x = 0.20;
+        cmd.angular.z = 0.4 * search_dir_;
+        
+        if (counter_ > 80) {  // 4 seconds
             stuck_counter_ = 0;
+            counter_ = 0;
+            search_dir_ *= -1;
         }
     } else {
-        cmd.angular.z = 0.25 * search_dir_;
+        // Normal search - rotate slowly while moving forward
+        if (counter_ > 50) {  // Change direction every 2.5 seconds
+            search_dir_ *= -1;
+            counter_ = 0;
+            stuck_counter_++;
+        }
+        
+        // Check if walls are on sides - turn toward closer wall
+        if (right < 2.0 && right < left) {
+            cmd.angular.z = -0.3;  // Turn right toward wall
+        } else if (left < 2.0 && left < right) {
+            cmd.angular.z = 0.3;  // Turn left toward wall
+        } else {
+            // No wall nearby - explore by turning
+            cmd.angular.z = 0.25 * search_dir_;
+        }
     }
     
     return cmd;
@@ -238,26 +285,27 @@ geometry_msgs::msg::Twist WallFollowerController::search() {
 
 geometry_msgs::msg::Twist WallFollowerController::escapeCollision() {
     geometry_msgs::msg::Twist cmd;
-    cmd.linear.x = 0.0;  // Stop immediately
+    cmd.linear.x = 0.0;  // STOP
     
-    // Analyze escape directions
-    double left_clearance = getMinInRange(45, 135, 5);
-    double right_clearance = getMinInRange(-135, -45, 5);
-    double back_left = getMinInRange(135, 180, 5);
-    double back_right = getMinInRange(-180, -135, 5);
+    // Check all directions
+    double left = getMinInRange(60, 120, 5);
+    double right = getMinInRange(-120, -60, 5);
+    double back = getMinInRange(150, 180, 10);
     
-    // Choose best escape direction
-    if (left_clearance > right_clearance && left_clearance > 0.8) {
-        cmd.angular.z = 0.8;  // Turn left aggressively
-    } else if (right_clearance > 0.8) {
-        cmd.angular.z = -0.8;  // Turn right aggressively
-    } else if (back_left > back_right && back_left > 0.6) {
-        cmd.angular.z = 0.8;  // Turn toward back-left
-    } else if (back_right > 0.6) {
-        cmd.angular.z = -0.8;  // Turn toward back-right
+    // Turn toward most open space
+    if (left > right && left > 0.7) {
+        cmd.angular.z = 0.8;  // Turn left
+        RCLCPP_INFO(this->get_logger(), "Escaping - turning left");
+    } else if (right > 0.7) {
+        cmd.angular.z = -0.8;  // Turn right
+        RCLCPP_INFO(this->get_logger(), "Escaping - turning right");
+    } else if (back > 0.5) {
+        cmd.angular.z = 0.8;  // Turn around
+        cmd.linear.x = -0.05;  // Back up slowly
+        RCLCPP_INFO(this->get_logger(), "Escaping - backing up");
     } else {
-        // If no good escape, rotate to find opening
-        cmd.angular.z = (counter_ % 40 < 20) ? 0.6 : -0.6;
+        // Rotate in place to find opening
+        cmd.angular.z = (counter_ % 60 < 30) ? 0.8 : -0.8;
     }
     
     return cmd;
@@ -268,40 +316,33 @@ void WallFollowerController::controlLoop() {
         return;
     }
     
-    // Enhanced collision check
+    // Check for immediate collision
     auto [collision, min_dist] = checkCollision();
-    if (collision) {
-        geometry_msgs::msg::Twist cmd = escapeCollision();
-        cmd_pub_->publish(cmd);
-        if (counter_ % 10 == 0) {  // Reduce log frequency
-            RCLCPP_WARN(this->get_logger(), "Collision avoidance! %.2fm - Escaping", min_dist);
-        }
-        counter_++;
-        return;
-    }
     
-    // Reset counter when not in collision
-    counter_ = 0;
-    
-    // Main navigation logic
     geometry_msgs::msg::Twist cmd;
-    if (following_wall_) {
+    
+    // Priority 1: Escape if collision imminent
+    if (collision) {
+        cmd = escapeCollision();
+        counter_++;
+    }
+    // Priority 2: Follow wall if already following
+    else if (following_wall_) {
         cmd = wallFollow();
-    } else if (findWall()) {
+    }
+    // Priority 3: Try to find a wall
+    else if (findWall()) {
         cmd = wallFollow();
-    } else {
+    }
+    // Priority 4: Search for wall
+    else {
         cmd = search();
     }
     
-    // Enhanced safety limits
-    cmd.linear.x = clamp(cmd.linear.x, 0.0, forward_speed_);
+    // Final safety limits
+    cmd.linear.x = clamp(cmd.linear.x, -0.1, forward_speed_);
     cmd.angular.z = clamp(cmd.angular.z, -max_angular_speed_, max_angular_speed_);
     
-    // Final safety check before publishing
-    double immediate_front = getMinInRange(-15, 15, 1);
-    if (immediate_front < 0.4) {  // Emergency brake
-        cmd.linear.x = 0.0;
-    }
-    
+    // Publish command
     cmd_pub_->publish(cmd);
 }
