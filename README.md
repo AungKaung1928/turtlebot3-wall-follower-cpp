@@ -1,6 +1,6 @@
 # 🤖 TurtleBot3 Wall Following Robot
 
-A robust C++ implementation of ROS2-based autonomous wall following robot for TurtleBot3 with intelligent obstacle avoidance and safe navigation. 🚀
+A robust C++ implementation of ROS2-based autonomous wall following robot for TurtleBot3 with intelligent obstacle avoidance and safe navigation. 
 
 ## 📋 Prerequisites
 
