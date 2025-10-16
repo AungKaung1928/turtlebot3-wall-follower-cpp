@@ -1,4 +1,4 @@
-# Basic navigation parameters for C++ wall following project
+# Basic navigation parameters for wall following project
 robot_base_frame: "base_link"
 global_frame: "map"
 robot_radius: 0.22
