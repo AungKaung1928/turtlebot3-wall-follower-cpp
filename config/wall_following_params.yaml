@@ -1,33 +1,31 @@
-wall_follower_controller_cpp:
+wall_follower_controller:
   ros__parameters:
     use_sim_time: true
-    
-    # Control parameters - SAFE DISTANCES
-    desired_distance: 0.8        # Keep 80cm from wall (safe distance)
-    forward_speed: 0.12          # Slower for safety
-    search_speed: 0.08           # Slow search
-    max_angular_speed: 0.5       # Controlled rotation
-    
-    # PID parameters
-    kp: 2.5                      # Proportional gain
-    ki: 0.0                      # No integral
-    kd: 0.3                      # Small derivative
-    
-    # Safety distances - INCREASED FOR NO COLLISION
-    emergency_stop: 0.4         # Stop at 40cm from obstacles
-    slow_down_dist: 0.6         # Start slowing at 60cm
-    wall_min: 0.5              # Never closer than 40cm to wall
-    wall_lost: 1.5              # Lose wall at 1.5m
-    side_clearance: 0.5         # 50cm side clearance
-    
-    # Wall detection parameters
-    wall_range: 1.5             # Max wall detection range
-    consistency: 0.3            # Consistency threshold
-    
-    # Timing parameters
-    control_frequency: 20.0      # Control loop frequency (Hz)
-    laser_timeout: 1.0          # Timeout for laser data (s)
-    
-    # Debug parameters
-    debug_mode: false           # Enable debug output
-    verbose_logging: false      # Enable verbose logging
+
+    # Control
+    desired_distance: 0.5           # Target distance from wall (m)
+    forward_speed: 0.18             # Normal forward speed (m/s)
+    search_speed: 0.12              # Speed while searching / rounding an outside corner (m/s)
+    max_angular_speed: 1.0          # Maximum rotation speed (rad/s)
+    control_frequency: 20.0         # Control loop rate (Hz)
+
+    # PD gains. The derivative divides by dt, so it is 1/dt times more sensitive than the
+    # proportional term; it is EMA-filtered in the node. Keep kd modest.
+    kp: 2.0
+    kd: 0.6
+    # Two-beam wall estimate: side beam plus one swung beam_spread_deg forward. The error is the
+    # wall distance predicted lookahead_distance ahead, so a converging heading is corrected early.
+    lookahead_distance: 0.3
+    beam_spread_deg: 40.0
+
+    # Safety distances (m). Must satisfy side_clearance < wall_min < desired < wall_lost
+    # and emergency_stop < slow_down.
+    emergency_stop_distance: 0.35
+    slow_down_distance: 0.80
+    wall_min_distance: 0.28
+    wall_lost_distance: 1.2
+    side_clearance: 0.25
+
+    # Behaviour
+    search_period_cycles: 60        # Cycles before reversing the search sweep direction
+    stuck_threshold_cycles: 3       # x20 cycles in AVOIDING before backing off

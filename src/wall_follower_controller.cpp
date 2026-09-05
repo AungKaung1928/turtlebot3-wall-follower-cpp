@@ -1,289 +1,279 @@
 #include "wall_following_cpp_project/wall_follower_controller.hpp"
-#include <cmath>
+
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <limits>
 
-using namespace std::chrono_literals;
+namespace wall_following
+{
 
-WallFollowerController::WallFollowerController() 
-    : Node("wall_follower_controller") {
-    
-    // TUNED PARAMETERS FOR TURTLEBOT3 WORLD
-    desired_distance_ = 0.8;      // Target wall distance
-    forward_speed_ = 0.15;        // Forward speed
-    search_speed_ = 0.1;          // Search speed
-    max_angular_speed_ = 0.6;     // Max rotation
-    kp_ = 3.0; kd_ = 0.5;         // PID gains
-    
-    // ADJUSTED SAFETY DISTANCES
-    emergency_stop_ = 0.25;       // Only stop if VERY close
-    slow_down_dist_ = 0.5;        // Slow down distance
-    wall_min_ = 0.45;              // Minimum wall distance
-    wall_lost_ = 1.0;             // Wall lost threshold
-    side_clearance_ = 0.3;        // Side clearance
-    
-    // State
-    following_wall_ = false;
-    wall_side_ = "right";
-    laser_data_ = nullptr;
-    prev_error_ = 0.0;
-    search_dir_ = 1;
-    counter_ = 0;
-    stuck_counter_ = 0;
-    
-    // Initialize helpers
-    wall_detector_ = std::make_unique<WallDetector>();
-    pid_controller_ = std::make_unique<PIDController>(kp_, 0.0, kd_, 0.05);
-    
-    // ROS2
-    cmd_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
-    scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-        "/scan", 10, 
-        std::bind(&WallFollowerController::laserCallback, this, std::placeholders::_1));
-    timer_ = this->create_wall_timer(50ms, std::bind(&WallFollowerController::controlLoop, this));
-    
-    RCLCPP_INFO(this->get_logger(), "Wall Follower Started - Simple Mode");
+using geometry_msgs::msg::Twist;
+
+WallFollowerController::WallFollowerController(const rclcpp::NodeOptions & options)
+: Node("wall_follower_controller", options)
+{
+  declareParameters();
+  loadParameters();
+  detector_ = std::make_unique<WallDetector>(p_.beam_spread_deg);
+  pid_ = std::make_unique<PidController>(p_.kp, p_.kd, 1.0 / p_.control_frequency);
+
+  cmd_pub_ = create_publisher<Twist>("/cmd_vel", 10);
+  state_pub_ = create_publisher<std_msgs::msg::String>("/wall_follower/state", 10);
+  // SensorDataQoS (best effort) receives from both the sim bridge and the real LDS driver.
+  scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+    "/scan", rclcpp::SensorDataQoS(),
+    std::bind(&WallFollowerController::laserCallback, this, std::placeholders::_1));
+  const auto period = std::chrono::duration<double>(1.0 / p_.control_frequency);
+  timer_ = create_wall_timer(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(period),
+    std::bind(&WallFollowerController::controlLoop, this));
+
+  RCLCPP_INFO(get_logger(), "Wall follower ready: target %.2f m, Kp=%.2f Kd=%.2f, %.0f Hz",
+    p_.desired_distance, p_.kp, p_.kd, p_.control_frequency);
 }
 
-void WallFollowerController::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
-    laser_data_ = msg;
+void WallFollowerController::declareParameters()
+{
+  declare_parameter<double>("desired_distance", 0.6);
+  declare_parameter<double>("forward_speed", 0.20);
+  declare_parameter<double>("search_speed", 0.16);
+  declare_parameter<double>("max_angular_speed", 0.6);
+  declare_parameter<double>("kp", 1.8);
+  declare_parameter<double>("kd", 0.7);
+  declare_parameter<double>("lookahead_distance", 0.3);
+  declare_parameter<double>("beam_spread_deg", 40.0);
+  declare_parameter<double>("emergency_stop_distance", 0.55);
+  declare_parameter<double>("slow_down_distance", 0.8);
+  declare_parameter<double>("wall_min_distance", 0.45);
+  declare_parameter<double>("wall_lost_distance", 1.5);
+  declare_parameter<double>("side_clearance", 0.4);
+  declare_parameter<int>("search_period_cycles", 60);
+  declare_parameter<int>("stuck_threshold_cycles", 3);
+  declare_parameter<double>("control_frequency", 20.0);
 }
 
-bool WallFollowerController::isInvalidFloat(double value) {
-    return std::isnan(value) || std::isinf(value);
+double WallFollowerController::paramInRange(const std::string & name, double lo, double hi)
+{
+  const double v = get_parameter(name).as_double();
+  if (v < lo || v > hi) {
+    RCLCPP_ERROR(get_logger(), "%s=%.3f outside [%.2f, %.2f]; using midpoint",
+      name.c_str(), v, lo, hi);
+    return 0.5 * (lo + hi);
+  }
+  return v;
 }
 
-double WallFollowerController::clamp(double value, double min_val, double max_val) {
-    return std::max(min_val, std::min(value, max_val));
+void WallFollowerController::loadParameters()
+{
+  p_.desired_distance = paramInRange("desired_distance", 0.3, 1.5);
+  p_.forward_speed = paramInRange("forward_speed", 0.05, 0.5);
+  p_.search_speed = paramInRange("search_speed", 0.05, 0.3);
+  p_.max_angular_speed = paramInRange("max_angular_speed", 0.1, 1.5);
+  p_.kp = paramInRange("kp", 0.1, 5.0);
+  p_.kd = paramInRange("kd", 0.0, 2.0);
+  p_.lookahead = paramInRange("lookahead_distance", 0.1, 1.0);
+  p_.beam_spread_deg = paramInRange("beam_spread_deg", 20.0, 70.0);
+  p_.emergency_stop = paramInRange("emergency_stop_distance", 0.2, 1.0);
+  p_.slow_down = paramInRange("slow_down_distance", 0.3, 1.5);
+  p_.wall_min = paramInRange("wall_min_distance", 0.2, 0.8);
+  p_.wall_lost = paramInRange("wall_lost_distance", 0.8, 3.0);
+  p_.side_clearance = paramInRange("side_clearance", 0.2, 0.8);
+  p_.search_period = get_parameter("search_period_cycles").as_int();
+  p_.stuck_threshold = get_parameter("stuck_threshold_cycles").as_int();
+  p_.control_frequency = paramInRange("control_frequency", 5.0, 100.0);
+  if (p_.emergency_stop >= p_.slow_down) {
+    RCLCPP_WARN(get_logger(), "emergency_stop >= slow_down; using 0.7 x slow_down");
+    p_.emergency_stop = 0.7 * p_.slow_down;
+  }
 }
 
-double WallFollowerController::getDist(double angle, bool avg) {
-    if (!laser_data_ || laser_data_->ranges.empty()) {
-        return std::numeric_limits<double>::infinity();
-    }
-    
-    // Convert angle to radians and normalize
-    double angle_rad = angle * M_PI / 180.0;
-    while (angle_rad > M_PI) angle_rad -= 2 * M_PI;
-    while (angle_rad < -M_PI) angle_rad += 2 * M_PI;
-    
-    // Calculate index
-    int idx = static_cast<int>((angle_rad - laser_data_->angle_min) / laser_data_->angle_increment);
-    
-    // Wrap around for angles
-    int total_readings = laser_data_->ranges.size();
-    if (idx < 0) idx += total_readings;
-    if (idx >= total_readings) idx -= total_readings;
-    
-    // Get reading(s)
-    if (!avg) {
-        // Single reading
-        if (idx >= 0 && idx < total_readings) {
-            double range = laser_data_->ranges[idx];
-            if (range > 0.1 && range < 3.5 && !isInvalidFloat(range)) {
-                return range;
-            }
-        }
-        return std::numeric_limits<double>::infinity();
-    } else {
-        // Average multiple readings for stability
-        std::vector<double> valid_ranges;
-        for (int offset = -3; offset <= 3; offset++) {
-            int check_idx = idx + offset;
-            if (check_idx < 0) check_idx += total_readings;
-            if (check_idx >= total_readings) check_idx -= total_readings;
-            
-            if (check_idx >= 0 && check_idx < total_readings) {
-                double range = laser_data_->ranges[check_idx];
-                if (range > 0.1 && range < 3.5 && !isInvalidFloat(range)) {
-                    valid_ranges.push_back(range);
-                }
-            }
-        }
-        
-        if (valid_ranges.empty()) {
-            return std::numeric_limits<double>::infinity();
-        }
-        
-        // Return average
-        double sum = 0.0;
-        for (double r : valid_ranges) sum += r;
-        return sum / valid_ranges.size();
-    }
+void WallFollowerController::laserCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr msg)
+{
+  scan_ = std::move(msg);
 }
 
-double WallFollowerController::getMinInRange(int start, int end, int step) {
-    double min_dist = std::numeric_limits<double>::infinity();
-    for (int angle = start; angle <= end; angle += step) {
-        double d = getDist(static_cast<double>(angle), false);
-        if (d < min_dist) min_dist = d;
-    }
-    return min_dist;
+const char * WallFollowerController::name(State s)
+{
+  switch (s) {
+    case State::SEARCHING: return "SEARCHING";
+    case State::FOLLOWING: return "FOLLOWING";
+    default: return "AVOIDING";
+  }
 }
 
-std::pair<bool, double> WallFollowerController::checkCollision() {
-    // Only check narrow front for real obstacles
-    double front = getMinInRange(-10, 10, 2);
-    return std::make_pair(front < emergency_stop_, front);
+void WallFollowerController::setState(State next, const std::string & reason)
+{
+  if (next != state_) {
+    RCLCPP_INFO(get_logger(), "%s -> %s: %s", name(state_), name(next), reason.c_str());
+  }
+  state_ = next;
+  state_counter_ = 0;
+  pid_->reset();
 }
 
-bool WallFollowerController::findWall() {
-    if (!laser_data_) return false;
-    
-    // Simple approach - check for walls on sides
-    double right = getDist(-90.0, true);
-    double left = getDist(90.0, true);
-    double front = getDist(0.0, true);
-    
-    // If wall in front, need to turn
-    if (front < 0.5) {
-        return false;  // Don't start following yet
-    }
-    
-    // Prefer right wall
-    if (right < 0.8) {
-        wall_side_ = "right";
-        following_wall_ = true;
-        RCLCPP_INFO(this->get_logger(), "Following RIGHT wall at %.2fm", right);
-        return true;
-    } else if (left < 0.8) {
-        wall_side_ = "left";
-        following_wall_ = true;
-        RCLCPP_INFO(this->get_logger(), "Following LEFT wall at %.2fm", left);
-        return true;
-    }
-    
-    return false;
+std::pair<bool, double> WallFollowerController::detectCollisionThreat(double margin) const
+{
+  const auto & s = *scan_;
+  const double stop = p_.emergency_stop * margin;
+  const double side = p_.side_clearance * margin;
+  const double front_center = detector_->minInArc(s, -20, 20, 2);
+  const double front_left = detector_->minInArc(s, 20, 50, 3);
+  const double front_right = detector_->minInArc(s, -50, -20, 3);
+  const double wide_left = detector_->minInArc(s, 50, 70, 5);
+  const double wide_right = detector_->minInArc(s, -70, -50, 5);
+  double right_side = detector_->minInArc(s, -90, -60, 3);
+  double left_side = detector_->minInArc(s, 60, 90, 3);
+  // The followed wall is expected close; followWall() guards it with wall_min instead.
+  if (state_ == State::FOLLOWING) {
+    (wall_sign_ < 0 ? right_side : left_side) = std::numeric_limits<double>::infinity();
+  }
+  const bool threat = front_center < stop || front_left < stop || front_right < stop ||
+    right_side < side || left_side < side || wide_left < side || wide_right < side;
+  return {threat, std::min({front_center, front_left, front_right})};
 }
 
-geometry_msgs::msg::Twist WallFollowerController::wallFollow() {
-    geometry_msgs::msg::Twist cmd;
-    
-    // KEY DISTANCES for wall following algorithm
-    double side_angle = (wall_side_ == "right") ? -90.0 : 90.0;
-    double diag_angle = (wall_side_ == "right") ? -45.0 : 45.0;
-    
-    double side_dist = getDist(side_angle, true);
-    double diag_dist = getDist(diag_angle, true);
-    double front_dist = getDist(0.0, true);
-    
-    // Lost wall check
-    if (side_dist > wall_lost_ || isInvalidFloat(side_dist)) {
-        following_wall_ = false;
-        RCLCPP_INFO(this->get_logger(), "Wall lost");
-        return search();
-    }
-    
-    // SIMPLE WALL FOLLOWING LOGIC
-    
-    // 1. If wall/obstacle in front, turn away
-    if (front_dist < 0.55) {
-        cmd.linear.x = 0.0;
-        cmd.angular.z = (wall_side_ == "right") ? 0.5 : -0.5;
-        return cmd;
-    }
-    
-    // 2. If too close to wall, turn away
-    if (side_dist < wall_min_) {
-        cmd.linear.x = 0.05;
-        cmd.angular.z = (wall_side_ == "right") ? 0.3 : -0.3;
-        return cmd;
-    }
-    
-    // 3. Normal wall following - simple proportional control
-    double error = side_dist - desired_distance_;
-    
-    // Simple P control (positive error = too far, negative = too close)
-    double angular = -2.0 * error;  // Negative because we want to turn toward wall when too far
-    
-    if (wall_side_ == "left") {
-        angular = -angular;  // Reverse for left wall
-    }
-    
-    // 4. Use diagonal sensor to anticipate corners
-    if (diag_dist < side_dist * 0.7 && diag_dist < 0.6) {
-        // Corner ahead - start turning
-        if (wall_side_ == "right") {
-            angular = std::max(angular, 0.3);  // Turn left for right wall
-        } else {
-            angular = std::min(angular, -0.3);  // Turn right for left wall
-        }
-    }
-    
-    // Set commands
-    cmd.angular.z = clamp(angular, -max_angular_speed_, max_angular_speed_);
-    
-    // Adjust speed based on turning
-    if (std::abs(cmd.angular.z) > 0.3) {
-        cmd.linear.x = forward_speed_ * 0.5;  // Slow down in turns
-    } else {
-        cmd.linear.x = forward_speed_;
-    }
-    
+Twist WallFollowerController::searchForWall()
+{
+  const auto & s = *scan_;
+  const double right = detector_->rangeAt(s, -90.0, true);
+  const double left = detector_->rangeAt(s, 90.0, true);
+  if (right < p_.wall_lost || left < p_.wall_lost) {
+    wall_sign_ = right < left ? -1 : 1;
+    char msg[64];
+    std::snprintf(msg, sizeof(msg), "wall on %s at %.2f m",
+      wall_sign_ < 0 ? "RIGHT" : "LEFT", std::min(right, left));
+    setState(State::FOLLOWING, msg);
+    return Twist();
+  }
+  Twist cmd;
+  const double front = detector_->minInArc(s, -25, 25, 2);
+  cmd.linear.x = front > p_.slow_down ? p_.search_speed : 0.4 * p_.search_speed;
+  if (++state_counter_ > p_.search_period) {
+    search_direction_ = -search_direction_;
+    state_counter_ = 0;
+  }
+  cmd.angular.z = 0.25 * search_direction_;
+  return cmd;
+}
+
+Twist WallFollowerController::followWall()
+{
+  const auto & s = *scan_;
+  Twist cmd;
+  const int lo = wall_sign_ < 0 ? -135 : 45;
+  const double arc_min = detector_->minInArc(s, lo, lo + 90, 3);
+  const auto wall = detector_->estimate(s, wall_sign_);
+
+  // Wall ended beside us (outside corner): both beams look past it while the rear-side arc
+  // still has it. Arc around it at the standoff radius instead of entering the search sweep.
+  if (!wall && arc_min <= p_.wall_lost) {
+    cmd.linear.x = p_.search_speed;
+    cmd.angular.z = wall_sign_ * p_.search_speed / p_.desired_distance;
     return cmd;
-}
+  }
+  const double wall_dist = wall ? wall->distance : arc_min;
+  const double alpha = wall ? wall->angle : 0.0;
 
-geometry_msgs::msg::Twist WallFollowerController::search() {
-    geometry_msgs::msg::Twist cmd;
-    
-    double front = getDist(0.0, true);
-    
-    // Simple search - move forward and rotate
-    if (front > 0.5) {
-        cmd.linear.x = search_speed_;
-        cmd.angular.z = 0.3;  // Gentle rotation while moving
-    } else {
-        cmd.linear.x = 0.0;
-        cmd.angular.z = 0.5;  // Just rotate if blocked
-    }
-    
+  if (std::min(wall_dist, arc_min) > p_.wall_lost) {
+    search_direction_ = wall_sign_;  // curve toward the side the wall was on
+    char msg[48];
+    std::snprintf(msg, sizeof(msg), "wall lost at %.2f m", wall_dist);
+    setState(State::SEARCHING, msg);
+    return Twist();
+  }
+  if (wall_dist < p_.wall_min) {
+    cmd.linear.x = 0.08;
+    cmd.angular.z = -wall_sign_ * 0.6;
     return cmd;
+  }
+
+  // Steer on the distance predicted lookahead metres ahead: a heading that converges on the
+  // wall shrinks the error before the wall arrives, which is what keeps the lock through turns.
+  const double predicted = wall_dist - p_.lookahead * std::sin(alpha);
+  const double error = predicted - p_.desired_distance;  // > 0: too far
+  const double omega = std::clamp(pid_->update(error), -p_.max_angular_speed, p_.max_angular_speed);
+  cmd.angular.z = wall_sign_ * omega;
+
+  const double front = detector_->minInArc(s, -30, 30, 2);
+  double speed = p_.forward_speed;
+  if (front < p_.slow_down) {
+    const double f = (front - p_.emergency_stop) / (p_.slow_down - p_.emergency_stop);
+    speed *= std::clamp(f, 0.2, 1.0);
+  }
+  if (std::fabs(cmd.angular.z) > 0.3) {
+    speed *= 1.0 - 0.7 * std::fabs(cmd.angular.z) / p_.max_angular_speed;
+  }
+  cmd.linear.x = std::max(0.05, speed);
+  return cmd;
 }
 
-geometry_msgs::msg::Twist WallFollowerController::escapeCollision() {
-    geometry_msgs::msg::Twist cmd;
-    
-    // Simple escape - back up and turn
-    cmd.linear.x = -0.05;  // Back up slowly
-    
-    // Turn away from obstacle
-    double left = getDist(90.0, false);
-    double right = getDist(-90.0, false);
-    
-    if (left > right) {
-        cmd.angular.z = 0.5;  // Turn left
-    } else {
-        cmd.angular.z = -0.5;  // Turn right
-    }
-    
-    return cmd;
+int WallFollowerController::pickEscapeDirection() const
+{
+  if (state_ == State::FOLLOWING) {
+    return -wall_sign_;  // away from the followed wall; into it is never the escape
+  }
+  const auto & s = *scan_;
+  const double left = detector_->minInArc(s, 45, 135, 5);
+  const double right = detector_->minInArc(s, -135, -45, 5);
+  return left >= right ? 1 : -1;
 }
 
-void WallFollowerController::controlLoop() {
-    if (!laser_data_) {
-        return;
-    }
-    
-    geometry_msgs::msg::Twist cmd;
-    
-    // Simple state machine
-    auto [collision, front_dist] = checkCollision();
-    
-    if (collision && front_dist < 0.2) {
-        // Only escape if REALLY close
-        cmd = escapeCollision();
-    } else if (following_wall_) {
-        cmd = wallFollow();
-    } else if (findWall()) {
-        cmd = wallFollow();
-    } else {
-        cmd = search();
-    }
-    
-    // Safety limits
-    cmd.linear.x = clamp(cmd.linear.x, -0.1, forward_speed_);
-    cmd.angular.z = clamp(cmd.angular.z, -max_angular_speed_, max_angular_speed_);
-    
-    // Publish
-    cmd_pub_->publish(cmd);
+Twist WallFollowerController::avoidCollision()
+{
+  Twist cmd;
+  ++state_counter_;
+  // Rotating in place cannot help when every heading is blocked (wedged in a corner):
+  // back off once the turn has clearly failed, but only if there is room behind.
+  if (state_counter_ > p_.stuck_threshold * 20 &&
+    detector_->minInArc(*scan_, 150, 210, 5) > 0.30)
+  {
+    cmd.linear.x = -0.06;
+  }
+  cmd.angular.z = 0.8 * escape_dir_;
+  return cmd;
 }
+
+void WallFollowerController::controlLoop()
+{
+  if (!scan_) {
+    return;
+  }
+  // Clearing needs a wider margin than tripping, otherwise the state chatters on the threshold.
+  const auto [threat, front] = detectCollisionThreat(state_ == State::AVOIDING ? 1.3 : 1.0);
+  Twist cmd;
+  if (threat) {
+    if (state_ != State::AVOIDING) {
+      resume_state_ = state_;
+      escape_dir_ = pickEscapeDirection();
+      char msg[48];
+      std::snprintf(msg, sizeof(msg), "front %.2f m", front);
+      setState(State::AVOIDING, msg);
+    }
+    cmd = avoidCollision();
+  } else {
+    if (state_ == State::AVOIDING) {
+      setState(resume_state_, "clear");  // keep the wall lock through a corner
+    }
+    cmd = state_ == State::SEARCHING ? searchForWall() : followWall();
+  }
+  // Lower bound is negative so avoidCollision() can back out of a corner.
+  cmd.linear.x = std::clamp(cmd.linear.x, -0.08, p_.forward_speed);
+  cmd.angular.z = std::clamp(cmd.angular.z, -p_.max_angular_speed, p_.max_angular_speed);
+  // Emergency brake for something already inside the stop distance.
+  if (detector_->minInArc(*scan_, -15, 15, 1) < 0.7 * p_.emergency_stop && cmd.linear.x > 0.0) {
+    cmd.linear.x = 0.0;
+  }
+  cmd_pub_->publish(cmd);
+  std_msgs::msg::String st;
+  st.data = name(state_);
+  state_pub_->publish(st);
+}
+
+void WallFollowerController::stop()
+{
+  RCLCPP_INFO(get_logger(), "Shutting down - stopping robot");
+  cmd_pub_->publish(Twist());
+}
+
+}  // namespace wall_following

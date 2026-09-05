@@ -1,147 +1,86 @@
 #include "wall_following_cpp_project/wall_detector.hpp"
+
+#include <algorithm>
 #include <cmath>
 #include <limits>
-#include <algorithm>
-#include <numeric>
 
-WallDetector::WallDetector() 
-    : wall_range_(1.5), consistency_(0.3) {
+namespace wall_following
+{
+
+namespace
+{
+constexpr double kInf = std::numeric_limits<double>::infinity();
+constexpr double kTwoPi = 2.0 * M_PI;
+}  // namespace
+
+WallDetector::WallDetector(double beam_spread_deg)
+: beam_spread_deg_(beam_spread_deg)
+{
 }
 
-bool WallDetector::isValidRange(double range) const {
-    return !std::isnan(range) && !std::isinf(range) && range > 0.1 && range < 3.5;
+std::size_t WallDetector::indexFor(const Scan & scan, double angle_deg)
+{
+  const auto n = scan.ranges.size();
+  double offset = std::fmod(angle_deg * M_PI / 180.0 - scan.angle_min, kTwoPi);
+  if (offset < 0.0) {
+    offset += kTwoPi;
+  }
+  const auto idx = static_cast<std::size_t>(std::lround(offset / scan.angle_increment));
+  return idx % n;
 }
 
-std::vector<double> WallDetector::getRangesAroundAngle(
-    const sensor_msgs::msg::LaserScan::SharedPtr laser_data,
-    double center_angle, int tolerance_indices) {
-    
-    std::vector<double> valid_ranges;
-    
-    if (!laser_data || laser_data->ranges.empty()) {
-        return valid_ranges;
-    }
-    
-    // Normalize angle to laser scan range
-    while (center_angle > M_PI) center_angle -= 2 * M_PI;
-    while (center_angle < -M_PI) center_angle += 2 * M_PI;
-    
-    // Calculate center index
-    int center_idx = static_cast<int>((center_angle - laser_data->angle_min) / laser_data->angle_increment);
-    
-    // Check bounds
-    if (center_idx < 0 || center_idx >= static_cast<int>(laser_data->ranges.size())) {
-        return valid_ranges;
-    }
-    
-    // Get range of indices to check
-    int start_idx = std::max(0, center_idx - tolerance_indices);
-    int end_idx = std::min(static_cast<int>(laser_data->ranges.size()) - 1, center_idx + tolerance_indices);
-    
-    // Collect valid ranges
-    for (int i = start_idx; i <= end_idx; ++i) {
-        double range = laser_data->ranges[i];
-        if (range > laser_data->range_min && range < laser_data->range_max && isValidRange(range)) {
-            valid_ranges.push_back(range);
-        }
-    }
-    
-    return valid_ranges;
+double WallDetector::validRange(const Scan & scan, std::size_t idx)
+{
+  const double r = scan.ranges[idx];
+  if (!std::isfinite(r) || r <= scan.range_min || r >= scan.range_max) {
+    return kInf;
+  }
+  return r;
 }
 
-double WallDetector::getRangeAtAngle(const sensor_msgs::msg::LaserScan::SharedPtr laser_data, 
-                                   double angle, double tolerance) {
-    if (!laser_data || laser_data->ranges.empty()) {
-        return std::numeric_limits<double>::infinity();
+double WallDetector::rangeAt(const Scan & scan, double angle_deg, bool average) const
+{
+  if (scan.ranges.empty()) {
+    return kInf;
+  }
+  const auto n = scan.ranges.size();
+  const auto idx = indexFor(scan, angle_deg);
+  if (!average) {
+    return validRange(scan, idx);
+  }
+  double sum = 0.0;
+  int count = 0;
+  for (int k = -3; k <= 3; ++k) {
+    const double r = validRange(scan, (idx + n + k) % n);
+    if (std::isfinite(r)) {
+      sum += r;
+      ++count;
     }
-    
-    // Convert angle to radians
-    double angle_rad = angle * M_PI / 180.0;
-    
-    // Calculate tolerance in indices
-    int tolerance_indices = static_cast<int>((tolerance * M_PI / 180.0) / laser_data->angle_increment);
-    tolerance_indices = std::max(1, tolerance_indices);  // At least 1 index
-    
-    // Get ranges around the target angle
-    std::vector<double> valid_ranges = getRangesAroundAngle(laser_data, angle_rad, tolerance_indices);
-    
-    if (valid_ranges.empty()) {
-        return std::numeric_limits<double>::infinity();
-    }
-    
-    // Return average of valid ranges for more stable reading
-    double sum = std::accumulate(valid_ranges.begin(), valid_ranges.end(), 0.0);
-    return sum / valid_ranges.size();
+  }
+  return count > 0 ? sum / count : kInf;
 }
 
-std::pair<bool, double> WallDetector::detectWallOnSide(
-    const sensor_msgs::msg::LaserScan::SharedPtr laser_data, 
-    const std::string& side) {
-    
-    // Define angles to check based on side
-    std::vector<double> angles;
-    if (side == "right") {
-        // Check right side angles
-        angles = {-90.0, -85.0, -95.0, -45.0};
-    } else if (side == "left") {
-        // Check left side angles
-        angles = {90.0, 85.0, 95.0, 45.0};
-    } else {
-        return std::make_pair(false, std::numeric_limits<double>::infinity());
-    }
-    
-    // Get distances at each angle
-    std::vector<double> distances;
-    for (double angle : angles) {
-        double dist = getRangeAtAngle(laser_data, angle, 5.0);  // 5 degree tolerance
-        if (dist < wall_range_ && dist > 0.2) {  // Minimum distance check
-            distances.push_back(dist);
-        }
-    }
-    
-    // Need at least 2 valid measurements
-    if (distances.size() < 2) {
-        return std::make_pair(false, std::numeric_limits<double>::infinity());
-    }
-    
-    // Check consistency
-    double min_dist = *std::min_element(distances.begin(), distances.end());
-    double max_dist = *std::max_element(distances.begin(), distances.end());
-    
-    // If measurements are consistent enough, wall is detected
-    if (max_dist - min_dist < consistency_ * 2) {
-        // Return average distance
-        double avg_dist = std::accumulate(distances.begin(), distances.end(), 0.0) / distances.size();
-        return std::make_pair(true, avg_dist);
-    }
-    
-    return std::make_pair(false, std::numeric_limits<double>::infinity());
+double WallDetector::minInArc(const Scan & scan, int start_deg, int end_deg, int step_deg) const
+{
+  double best = kInf;
+  for (int a = start_deg; a <= end_deg; a += step_deg) {
+    best = std::min(best, rangeAt(scan, a, false));
+  }
+  return best;
 }
 
-std::pair<std::string, double> WallDetector::findBestWall(
-    const sensor_msgs::msg::LaserScan::SharedPtr laser_data) {
-    
-    // Check both sides
-    auto [right_found, right_dist] = detectWallOnSide(laser_data, "right");
-    auto [left_found, left_dist] = detectWallOnSide(laser_data, "left");
-    
-    // Prefer the closer wall
-    if (right_found && left_found) {
-        if (right_dist < left_dist) {
-            return std::make_pair("right", right_dist);
-        } else {
-            return std::make_pair("left", left_dist);
-        }
-    } else if (right_found) {
-        return std::make_pair("right", right_dist);
-    } else if (left_found) {
-        return std::make_pair("left", left_dist);
-    }
-    
-    return std::make_pair("none", std::numeric_limits<double>::infinity());
+std::optional<WallEstimate> WallDetector::estimate(const Scan & scan, int side_sign) const
+{
+  const double theta = beam_spread_deg_ * M_PI / 180.0;
+  const double b = rangeAt(scan, side_sign * 90.0, true);
+  const double a = rangeAt(scan, side_sign * (90.0 - beam_spread_deg_), true);
+  if (!std::isfinite(a) || !std::isfinite(b)) {
+    return std::nullopt;
+  }
+  // b = d/cos(alpha), a = d/cos(theta - alpha)  =>  tan(alpha) = (b - a cos theta) / (a sin theta)
+  double alpha = std::atan2(b - a * std::cos(theta), a * std::sin(theta));
+  alpha = std::clamp(alpha, -1.0, 1.0);
+  return WallEstimate{b * std::cos(alpha), alpha};
 }
 
-void WallDetector::setParameters(double wall_range, double consistency) {
-    wall_range_ = wall_range;
-    consistency_ = consistency;
-}
+}  // namespace wall_following

@@ -1,137 +1,84 @@
-#ifndef WALL_FOLLOWER_CONTROLLER_HPP
-#define WALL_FOLLOWER_CONTROLLER_HPP
+#pragma once
 
-#include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
-#include <geometry_msgs/msg/twist.hpp>
 #include <memory>
 #include <string>
+#include <utility>
 
-#include "wall_following_cpp_project/wall_detector.hpp"
+#include <geometry_msgs/msg/twist.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <std_msgs/msg/string.hpp>
+
 #include "wall_following_cpp_project/pid_controller.hpp"
+#include "wall_following_cpp_project/wall_detector.hpp"
 
-/**
- * @brief Main Wall Following Controller Node
- * 
- * This class implements the main control logic for autonomous wall following
- * behavior with enhanced safety features and collision avoidance.
- */
-class WallFollowerController : public rclcpp::Node {
+namespace wall_following
+{
+
+enum class State { SEARCHING, FOLLOWING, AVOIDING };
+
+/// Reactive wall follower: SEARCHING -> FOLLOWING (PD on look-ahead wall distance) with
+/// AVOIDING pre-empting both when the front or side zones are blocked.
+class WallFollowerController : public rclcpp::Node
+{
 public:
-    /**
-     * @brief Constructor for Wall Follower Controller
-     */
-    WallFollowerController();
+  explicit WallFollowerController(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
+
+  /// Publish a zero Twist. Called once from main() after the executor stops.
+  void stop();
 
 private:
-    // Safety and control parameters
-    double desired_distance_;     ///< Target distance from wall (m)
-    double forward_speed_;        ///< Normal forward speed (m/s)
-    double search_speed_;         ///< Speed during wall search (m/s)
-    double max_angular_speed_;    ///< Maximum angular velocity (rad/s)
-    double kp_, kd_;             ///< PID gains for wall following
-    
-    // Safety distances - INCREASED FOR NO CONTACT
-    double emergency_stop_;       ///< Emergency brake distance (m)
-    double slow_down_dist_;       ///< Distance to start slowing down (m)
-    double wall_min_;            ///< Minimum allowed distance to wall (m)
-    double wall_lost_;           ///< Distance threshold for losing wall (m)
-    double side_clearance_;      ///< Minimum side obstacle clearance (m)
-    
-    // State variables
-    bool following_wall_;        ///< Currently following a wall
-    std::string wall_side_;      ///< Side of wall being followed ("right" or "left")
-    sensor_msgs::msg::LaserScan::SharedPtr laser_data_;  ///< Latest laser scan data
-    double prev_error_;          ///< Previous error for derivative control
-    int search_dir_;             ///< Search direction (+1 or -1)
-    int counter_;                ///< General purpose counter
-    int stuck_counter_;          ///< Counter for stuck detection
-    
-    // ROS2 components
-    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
-    rclcpp::TimerBase::SharedPtr timer_;
-    
-    // Helper objects
-    std::unique_ptr<WallDetector> wall_detector_;
-    std::unique_ptr<PIDController> pid_controller_;
-    
-    // Callback functions
-    /**
-     * @brief Laser scan callback
-     * @param msg Laser scan message
-     */
-    void laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr msg);
-    
-    /**
-     * @brief Main control loop callback
-     */
-    void controlLoop();
-    
-    // Control methods
-    /**
-     * @brief Get distance measurement at specific angle
-     * @param angle Angle in degrees
-     * @param avg Whether to average multiple readings
-     * @return Distance measurement
-     */
-    double getDist(double angle, bool avg = false);
-    
-    /**
-     * @brief Get minimum distance in angle range
-     * @param start Start angle (degrees)
-     * @param end End angle (degrees)
-     * @param step Step size (degrees)
-     * @return Minimum distance in range
-     */
-    double getMinInRange(int start, int end, int step = 2);
-    
-    /**
-     * @brief Enhanced collision detection
-     * @return Pair of (collision_detected, front_distance)
-     */
-    std::pair<bool, double> checkCollision();
-    
-    /**
-     * @brief Find nearest wall to follow
-     * @return True if wall found and following started
-     */
-    bool findWall();
-    
-    /**
-     * @brief Execute wall following behavior
-     * @return Twist command for wall following
-     */
-    geometry_msgs::msg::Twist wallFollow();
-    
-    /**
-     * @brief Execute wall search behavior
-     * @return Twist command for searching
-     */
-    geometry_msgs::msg::Twist search();
-    
-    /**
-     * @brief Execute collision escape behavior
-     * @return Twist command for escaping collision
-     */
-    geometry_msgs::msg::Twist escapeCollision();
-    
-    // Utility methods
-    /**
-     * @brief Check if a value is NaN or Inf
-     * @param value Value to check
-     * @return True if value is NaN or Inf
-     */
-    bool isInvalidFloat(double value);
-    
-    /**
-     * @brief Clamp value between min and max
-     * @param value Value to clamp
-     * @param min_val Minimum value
-     * @param max_val Maximum value
-     * @return Clamped value
-     */
-    double clamp(double value, double min_val, double max_val);
+  struct Params
+  {
+    double desired_distance;
+    double forward_speed;
+    double search_speed;
+    double max_angular_speed;
+    double kp;
+    double kd;
+    double lookahead;
+    double beam_spread_deg;
+    double emergency_stop;
+    double slow_down;
+    double wall_min;
+    double wall_lost;
+    double side_clearance;
+    int search_period;
+    int stuck_threshold;
+    double control_frequency;
+  };
+
+  void declareParameters();
+  double paramInRange(const std::string & name, double lo, double hi);
+  void loadParameters();
+
+  void laserCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr msg);
+  void controlLoop();
+
+  std::pair<bool, double> detectCollisionThreat(double margin) const;
+  geometry_msgs::msg::Twist searchForWall();
+  geometry_msgs::msg::Twist followWall();
+  geometry_msgs::msg::Twist avoidCollision();
+  int pickEscapeDirection() const;
+  void setState(State next, const std::string & reason);
+  static const char * name(State s);
+
+  Params p_{};
+  std::unique_ptr<WallDetector> detector_;
+  std::unique_ptr<PidController> pid_;
+
+  State state_{State::SEARCHING};
+  State resume_state_{State::SEARCHING};
+  int wall_sign_{-1};  ///< -1 = wall on the right, +1 = wall on the left
+  int search_direction_{1};
+  int escape_dir_{1};
+  int state_counter_{0};
+  sensor_msgs::msg::LaserScan::ConstSharedPtr scan_;
+
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+  rclcpp::TimerBase::SharedPtr timer_;
 };
 
-#endif // WALL_FOLLOWER_CONTROLLER_HPP
+}  // namespace wall_following
