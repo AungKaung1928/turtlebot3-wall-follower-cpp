@@ -74,6 +74,8 @@ private:
   int escape_dir_{1};
   int state_counter_{0};
   sensor_msgs::msg::LaserScan::ConstSharedPtr scan_;
+  rclcpp::Time last_scan_time_;
+  static constexpr double kScanTimeout = 0.5;  // s
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;

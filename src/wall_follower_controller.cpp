@@ -91,6 +91,7 @@ void WallFollowerController::loadParameters()
 void WallFollowerController::laserCallback(sensor_msgs::msg::LaserScan::ConstSharedPtr msg)
 {
   scan_ = std::move(msg);
+  last_scan_time_ = now();
 }
 
 const char * WallFollowerController::name(State s)
@@ -237,6 +238,14 @@ Twist WallFollowerController::avoidCollision()
 void WallFollowerController::controlLoop()
 {
   if (!scan_) {
+    return;
+  }
+  // A stale scan is no scan: stop instead of driving on old data (LiDAR unplugged, driver crash).
+  // The LDS publishes at ~5 Hz, so 0.5 s tolerates one or two dropped scans.
+  const double age = (now() - last_scan_time_).seconds();
+  if (age > kScanTimeout) {
+    cmd_pub_->publish(Twist());
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "No /scan for %.1f s: stopped", age);
     return;
   }
   // Clearing needs a wider margin than tripping, otherwise the state chatters on the threshold.
