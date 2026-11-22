@@ -85,6 +85,10 @@ Watch the FSM: `ros2 topic echo /wall_follower/state`.
 
 Without Gazebo: `cd src/wall_following_cpp_project && launch_test test/test_launch_scenes.py` starts the installed node with the shipped parameters, drives it with synthetic scans (open space, wall on the right, obstacle ahead, obstacle gone) and checks it resumes following, then exits cleanly. The Python package runs the same scenes; CI runs both in `ros:humble`.
 
+![/cmd_vel from the CI launch test of the C++ node: searching, following a wall on the right, stopping and turning at an obstacle, resuming](docs/scenes.svg)
+
+CI run of 37f573a, CSV artifact plotted by `scripts/plot_scenes.py`. Against the Python node's run (a8b333f) the median command per scene is the same to 3 decimals: open (0.120 m/s, 0.250 rad/s), wall right (0.180, -0.147), obstacle ahead (0.000, 0.800), obstacle gone (0.180, -0.147). Synthetic scans, no robot motion.
+
 ## Parameters (`config/wall_following_params.yaml`)
 | Parameter | Value | Meaning |
 |---|---|---|
