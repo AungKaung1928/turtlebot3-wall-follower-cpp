@@ -4,11 +4,6 @@ A C++17 ROS 2 Humble node that finds the nearest wall with a 2D LiDAR and follow
 fixed standoff in Gazebo Harmonic: two-beam wall-angle estimate, filtered PD on the
 look-ahead distance, three-state FSM with collision pre-emption.
 
-[![ROS2](https://img.shields.io/badge/ROS2-Humble-blue?style=for-the-badge&logo=ros&logoColor=white)](https://docs.ros.org/en/humble/Installation.html)
-[![C++](https://img.shields.io/badge/C++-17-blue?style=for-the-badge&logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/17)
-[![Gazebo](https://img.shields.io/badge/Gazebo-Harmonic-orange?style=for-the-badge&logo=gazebo&logoColor=white)](https://gazebosim.org/docs/harmonic/ros_installation/)
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange?style=for-the-badge&logo=ubuntu&logoColor=white)](https://ubuntu.com/)
-
 Python sibling with the same behaviour and benchmark: [turtlebot3-wall-follower](https://github.com/AungKaung1928/turtlebot3-wall-follower).
 
 ## Node graph
@@ -129,3 +124,7 @@ partition's outside corner. The Python sibling measures 92.7 % / 0.139 m / 95.4 
 - Front-arc steering term so inside corners become a planned arc instead of a 2 s stop-and-turn.
 - gtest on `WallDetector::estimate` with synthetic scans (parallel, converging, wall end).
 - Real TurtleBot3 run: the scan QoS and index wrapping already handle the LDS-01 conventions.
+
+## License
+
+Apache-2.0, see LICENSE.
