@@ -83,6 +83,8 @@ Benchmark arena: `world:=$(ros2 pkg prefix wall_following_cpp_project)/share/wal
 
 Watch the FSM: `ros2 topic echo /wall_follower/state`.
 
+Without Gazebo: `cd src/wall_following_cpp_project && launch_test test/test_launch_scenes.py` starts the installed node with the shipped parameters, drives it with synthetic scans (open space, wall on the right, obstacle ahead, obstacle gone) and checks it resumes following, then exits cleanly. The Python package runs the same scenes; CI runs both in `ros:humble`.
+
 ## Parameters (`config/wall_following_params.yaml`)
 | Parameter | Value | Meaning |
 |---|---|---|
