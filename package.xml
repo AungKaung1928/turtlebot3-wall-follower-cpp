@@ -4,7 +4,7 @@
   <name>wall_following_cpp_project</name>
   <version>1.1.0</version>
   <description>C++ reactive wall follower for TurtleBot3 in Gazebo Harmonic: two-beam wall estimate, filtered PD, 3-state FSM</description>
-  <maintainer email="103877301+AungKaung1928@users.noreply.github.com">Aung Kaung Myat</maintainer>
+  <maintainer email="dev@example.com">Developer</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
