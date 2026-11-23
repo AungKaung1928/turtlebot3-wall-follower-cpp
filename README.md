@@ -89,7 +89,7 @@ Without Gazebo: `cd src/wall_following_cpp_project && launch_test test/test_laun
 
 CI run of 37f573a, CSV artifact plotted by `scripts/plot_scenes.py`. Against the Python node's run (a8b333f) the median command per scene is the same to 3 decimals: open (0.120 m/s, 0.250 rad/s), wall right (0.180, -0.147), obstacle ahead (0.000, 0.800), obstacle gone (0.180, -0.147). Synthetic scans, no robot motion.
 
-If `/scan` stops (no message for 0.5 s), the node publishes a zero `/cmd_vel` instead of driving on the last scan; `test/test_launch_stale_scan.py` checks this in CI.
+If `/scan` stops (no message for 0.5 s), the node publishes a zero `/cmd_vel` instead of driving on the last scan; `test/test_launch_stale_scan.py` checks this in CI. Ctrl+C (SIGINT) also ends with a zero `/cmd_vel` (`test/test_launch_sigint.py`).
 
 ## Parameters (`config/wall_following_params.yaml`)
 | Parameter | Value | Meaning |
