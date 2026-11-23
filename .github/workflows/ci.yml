@@ -28,6 +28,10 @@ jobs:
         run: |
           source install/setup.bash
           ros2 pkg prefix wall_following_cpp_project
+      - name: Unit test (WallDetector scan geometry, both scan layouts)
+        run: |
+          source install/setup.bash
+          build/wall_following_cpp_project/test_wall_detector
       - name: Launch test (node as its own process, shipped params)
         run: |
           source install/setup.bash
